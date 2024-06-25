@@ -223,6 +223,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Var(utilflag.PortRangeVar{Val: &o.config.PortRange}, "proxy-port-range", "This was previously used to configure the userspace proxy, but is now unused.")
 	_ = fs.MarkDeprecated("proxy-port-range", "This flag has no effect and will be removed in a future release.")
 
+	// 写入与日志相关的命令行参数，主要用的是日志详细等级（-v，--v）
 	logsapi.AddFlags(&o.config.Logging, fs)
 }
 
@@ -384,6 +385,7 @@ func (o *Options) Run() error {
 	// We ignore err otherwise; the cleanup is best-effort, and the backends will have
 	// logged messages if they failed in interesting ways.
 
+	// 最复杂的步骤(一)：创建ProxyServer
 	proxyServer, err := newProxyServer(o.logger, o.config, o.master, o.InitAndExit)
 	if err != nil {
 		return err
@@ -393,6 +395,7 @@ func (o *Options) Run() error {
 	}
 
 	o.proxyServer = proxyServer
+	// 最复杂的步骤(二)：运行ProxyServer
 	return o.runLoop()
 }
 
@@ -520,6 +523,7 @@ func (o *Options) loadConfig(data []byte) (*kubeproxyconfig.KubeProxyConfigurati
 
 // NewProxyCommand creates a *cobra.Command object with default parameters
 func NewProxyCommand() *cobra.Command {
+	// 创建一个Options，封装了一个KubeProxyConfiguration
 	opts := NewOptions()
 
 	cmd := &cobra.Command{
@@ -538,6 +542,7 @@ with the apiserver API to configure the proxy.`,
 				return fmt.Errorf("failed os init: %w", err)
 			}
 
+			// 把配置文件内容和命令行选项合并起来，构建最终的KubeProxyConfiguration
 			if err := opts.Complete(cmd.Flags()); err != nil {
 				return fmt.Errorf("failed complete: %w", err)
 			}
@@ -549,6 +554,7 @@ with the apiserver API to configure the proxy.`,
 
 			cliflag.PrintFlags(cmd.Flags())
 
+			// 验证配置参数是否有不合理的
 			if err := opts.Validate(); err != nil {
 				return fmt.Errorf("failed validate: %w", err)
 			}
@@ -561,6 +567,7 @@ with the apiserver API to configure the proxy.`,
 
 			return nil
 		},
+		// 处理命令行参数的回调函数，选项解析完成后，会调用它来完成参数的解析，这里表示kube-proxy不接收任何参数
 		Args: func(cmd *cobra.Command, args []string) error {
 			for _, arg := range args {
 				if len(arg) > 0 {
@@ -571,7 +578,9 @@ with the apiserver API to configure the proxy.`,
 		},
 	}
 
+	// 创建一个空白的FlagSet，用来解析命令行参数
 	fs := cmd.Flags()
+	// 把kube-proxy支持的所有命令行参数写入到FlagSet里，并把指针注入到FlagSet里，保证当解析命令行参数时，值会通过指针写入到Options对象里，参数解析完毕后，把FlagSet丢弃掉，可以直接使用Options
 	opts.AddFlags(fs)
 	fs.AddGoFlagSet(goflag.CommandLine) // for --boot-id-file and --machine-id-file
 
