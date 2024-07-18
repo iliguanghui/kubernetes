@@ -170,6 +170,7 @@ func NewServiceConfig(serviceInformer v1informers.ServiceInformer, resyncPeriod 
 		listerSynced: serviceInformer.Informer().HasSynced,
 	}
 
+	// 把ServiceConfig和informer关联起来
 	_, _ = serviceInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    result.handleAddService,

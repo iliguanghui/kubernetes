@@ -294,6 +294,7 @@ var internalPackages = []string{"client-go/tools/cache/"}
 // Run will exit when stopCh is closed.
 func (r *Reflector) Run(stopCh <-chan struct{}) {
 	klog.V(3).Infof("Starting reflector %s (%s) from %s", r.typeDescription, r.resyncPeriod, r.name)
+	// 一直运行ListAndWatch，直到stopCh传来停止的信号
 	wait.BackoffUntil(func() {
 		if err := r.ListAndWatch(stopCh); err != nil {
 			r.watchErrorHandler(r, err)
@@ -328,6 +329,8 @@ func (r *Reflector) resyncChan() (<-chan time.Time, func() bool) {
 // ListAndWatch first lists all items and get the resource version at the moment of call,
 // and then use the resource version to watch.
 // It returns error if ListAndWatch didn't even try to initialize watch.
+// Reflector首先通过List操作获取全量的资源对象数据，调用DeltaFIFO的Replace方法全量插入DeltaFIFO，
+// 然后后续通过Watch操作根据资源对象的变化类型相应的调用DeltaFIFO的Add、Update、Delete方法，将对象及其变化插入到DeltaFIFO中。
 func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 	klog.V(3).Infof("Listing and watching %v from %s", r.typeDescription, r.name)
 	var err error
@@ -350,6 +353,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 	}
 
 	if fallbackToList {
+		// Reflector主要逻辑一：-list只在本goroutine里执行一次
 		err = r.list(stopCh)
 		if err != nil {
 			return err
@@ -479,6 +483,7 @@ func (r *Reflector) watch(w watch.Interface, stopCh <-chan struct{}, resyncerrc 
 // the resource version can be used for further progress notification (aka. watch).
 func (r *Reflector) list(stopCh <-chan struct{}) error {
 	var resourceVersion string
+	// 从Reflector获取最近一次获取到的resourceVersion
 	options := metav1.ListOptions{ResourceVersion: r.relistResourceVersion()}
 
 	initTrace := trace.New("Reflector ListAndWatch", trace.Field{Key: "name", Value: r.name})
@@ -488,6 +493,7 @@ func (r *Reflector) list(stopCh <-chan struct{}) error {
 	var err error
 	listCh := make(chan struct{}, 1)
 	panicCh := make(chan interface{}, 1)
+	// 在一个新goroutine里完成list请求和结果反序列化
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -522,6 +528,7 @@ func (r *Reflector) list(stopCh <-chan struct{}) error {
 			pager.PageSize = 0
 		}
 
+		// 真正开始连接到apiserver，发送list请求，解析结果，得到的是全量资源对象
 		list, paginatedResult, err = pager.ListWithAlloc(context.Background(), options)
 		if isExpiredError(err) || isTooLargeResourceVersionError(err) {
 			r.setIsLastSyncResourceVersionUnavailable(true)
@@ -533,6 +540,7 @@ func (r *Reflector) list(stopCh <-chan struct{}) error {
 			// the reflector makes forward progress.
 			list, paginatedResult, err = pager.ListWithAlloc(context.Background(), metav1.ListOptions{ResourceVersion: r.relistResourceVersion()})
 		}
+		// 把通道关掉，通知另外一个协程可以开始工作了
 		close(listCh)
 	}()
 	select {
@@ -567,6 +575,7 @@ func (r *Reflector) list(stopCh <-chan struct{}) error {
 	if err != nil {
 		return fmt.Errorf("unable to understand list result %#v: %v", list, err)
 	}
+	// 根据list回来的资源对象，获取最新的resourceVersion
 	resourceVersion = listMetaInterface.GetResourceVersion()
 	initTrace.Step("Resource version extracted")
 	items, err := meta.ExtractListWithAlloc(list)
@@ -574,10 +583,12 @@ func (r *Reflector) list(stopCh <-chan struct{}) error {
 		return fmt.Errorf("unable to understand list result %#v (%v)", list, err)
 	}
 	initTrace.Step("Objects extracted")
+	// 把List的结果存入DeltaFIFO中，方便其他消费者处理
 	if err := r.syncWith(items, resourceVersion); err != nil {
 		return fmt.Errorf("unable to sync list result: %v", err)
 	}
 	initTrace.Step("SyncWith done")
+	// 把这一次list得到的resourceVersion保存到Reflector里，下一次进行ListAndWatch就可以从这里开始了
 	r.setLastSyncResourceVersion(resourceVersion)
 	initTrace.Step("Resource version updated")
 	return nil

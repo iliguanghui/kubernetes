@@ -249,9 +249,13 @@ func NewDeltaFIFOWithOptions(opts DeltaFIFOOptions) *DeltaFIFO {
 	}
 
 	f := &DeltaFIFO{
-		items:        map[string]Deltas{},
-		queue:        []string{},
-		keyFunc:      opts.KeyFunction,
+		// 临时存储从apiserver上list和watch到的资源对象变化数据
+		items: map[string]Deltas{},
+		// 记录了从apiserver上List和watch到的资源对象的名字，消费的时候按照名字一个个取回
+		queue: []string{},
+		// 把对象转为名字的函数，传入一个对象，返回一个名字字符串
+		keyFunc: opts.KeyFunction,
+		// 本地缓存已经知道的对象，如果自己知道的对象在list结果里不存在，就说明资源已经在apiserver上被删除了，就是sharedIndexInformer里的indexer，一个线程安全的存储结构
 		knownObjects: opts.KnownObjects,
 
 		emitDeltaTypeReplaced: opts.EmitDeltaTypeReplaced,
@@ -304,6 +308,8 @@ func (f *DeltaFIFO) HasSynced() bool {
 }
 
 func (f *DeltaFIFO) hasSynced_locked() bool {
+	// initialPopulationCount的值在第一次调用DeltaFIFO的Replace方法中设置值为加入到items中的Deltas的数量，
+	// 然后每pop一个Deltas，则initialPopulationCount的值减1，pop完成时值则为0。
 	return f.populated && f.initialPopulationCount == 0
 }
 
@@ -572,15 +578,19 @@ func (f *DeltaFIFO) Pop(process PopProcessFunc) (interface{}, error) {
 				return nil, ErrFIFOClosed
 			}
 
+			// 等待通知（与queueActionLocked方法中的f.cond.Broadcast()相对应，即queue中有对象key则发起通知）
 			f.cond.Wait()
 		}
 		isInInitialList := !f.hasSynced_locked()
+		// 取出queue的队头对象key，更新queue
 		id := f.queue[0]
 		f.queue = f.queue[1:]
 		depth := len(f.queue)
+		// 当减到0时则代表第一次调用Replace方法加入DeltaFIFO中的对象key已经被pop完成
 		if f.initialPopulationCount > 0 {
 			f.initialPopulationCount--
 		}
+		// 根据对象key从items中获取对象，并从items里删除它
 		item, ok := f.items[id]
 		if !ok {
 			// This should never happen

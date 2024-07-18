@@ -269,7 +269,9 @@ func NewSharedIndexInformerWithOptions(lw ListerWatcher, exampleObject runtime.O
 	realClock := &clock.RealClock{}
 
 	return &sharedIndexInformer{
-		indexer:                         NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, options.Indexers),
+		// Indexer中有informer维护的指定资源对象的相对于etcd数据的一份本地内存缓存，可通过该缓存获取资源对象，以减少对apiserver、对etcd的请求压力
+		indexer: NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, options.Indexers),
+		// Processor根据对象的变化事件类型，调用相应的ResourceEventHandler来处理对象的变化
 		processor:                       &sharedProcessor{clock: realClock},
 		listerWatcher:                   lw,
 		objectType:                      exampleObject,
@@ -483,10 +485,12 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 			RetryOnError:      false,
 			ShouldResync:      s.processor.shouldResync,
 
+			//  用来处理从Queue里弹出来的Deltas
 			Process:           s.HandleDeltas,
 			WatchErrorHandler: s.watchErrorHandler,
 		}
 
+		// Controller从DeltaFIFO中pop Deltas出来处理，根据对象的变化更新Indexer中的本地内存缓存，并通知Processor，相关对象有变化事件发生
 		s.controller = New(cfg)
 		s.controller.(*controller).clock = s.clock
 		s.started = true
@@ -498,6 +502,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	defer wg.Wait()              // Wait for Processor to stop
 	defer close(processorStopCh) // Tell Processor to stop
 	wg.StartWithChannel(processorStopCh, s.cacheMutationDetector.Run)
+	// 启动processor
 	wg.StartWithChannel(processorStopCh, s.processor.run)
 
 	defer func() {
@@ -505,6 +510,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		defer s.startedLock.Unlock()
 		s.stopped = true // Don't want any new listeners
 	}()
+	// 启动controller
 	s.controller.Run(stopCh)
 }
 
@@ -606,11 +612,14 @@ func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEv
 		}
 	}
 
+	// 把handler封装成一个listener，当收到通知时，调用handler的处理方法
 	listener := newProcessListener(handler, resyncPeriod, determineResyncPeriod(resyncPeriod, s.resyncCheckPeriod), s.clock.Now(), initialBufferSize, s.HasSynced)
 
 	if !s.started {
+		// 如果informer还没有启动，把listener注册到processor，后面会统一启动
 		return s.processor.addListener(listener), nil
 	}
+	// 如果自己是半道进来的，不光要启动，还要把自己之前错过的通知补一遍
 
 	// in order to safely join, we have to
 	// 1. stop sending add/update/delete notifications

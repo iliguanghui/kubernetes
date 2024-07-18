@@ -27,6 +27,7 @@ import (
 )
 
 func main() {
+	// 构造一个Command对象，给出所有支持的命令行选项，以及配置信息保存的位置
 	command := app.NewProxyCommand()
 	code := cli.Run(command)
 	os.Exit(code)
